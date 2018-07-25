@@ -55,49 +55,74 @@ class SCN():
 
     def build_model(self):
         # define placeholder:
+        # 上下文句子
         self.utterance_ph = tf.placeholder(tf.int32, shape=(None, self.max_num_utterance, self.max_sentence_len))
+        # 回答句子
         self.response_ph = tf.placeholder(tf.int32, shape=(None, self.max_sentence_len))
         self.y_true = tf.placeholder(tf.int32, shape=(None,))
+        # 词向量
         self.embedding_ph = tf.placeholder(tf.float32, shape=(self.total_words, self.word_embedding_size))
         self.response_len = tf.placeholder(tf.int32, shape=(None,))
+        # 多少条上下文句子
         self.all_utterance_len_ph = tf.placeholder(tf.int32, shape=(None, self.max_num_utterance))
         # embedding layer:
         word_embeddings = tf.get_variable('word_embeddings_v', shape=(self.total_words, self.
                                                                       word_embedding_size), dtype=tf.float32,
                                           trainable=False)
         self.embedding_init = word_embeddings.assign(self.embedding_ph)
+        # 转成词向量形式
         all_utterance_embeddings = tf.nn.embedding_lookup(word_embeddings, self.utterance_ph)
+        # None,答句长度，词向量维度
         response_embeddings = tf.nn.embedding_lookup(word_embeddings, self.response_ph)
         # sentence_GRU = rnn.GRUCell(self.rnn_units,kernel_initializer=tf.orthogonal_initializer())
+        # run_units 隐藏神经元的个数
         sentence_GRU = rnn.GRUCell(self.rnn_units)
+        # 句子数，每个句子的长度，词向量
         all_utterance_embeddings = tf.unstack(all_utterance_embeddings, num=self.max_num_utterance, axis=1)
+        # 每个句子的长度为一个
         all_utterance_len = tf.unstack(self.all_utterance_len_ph, num=self.max_num_utterance, axis=1)
         A_matrix = tf.get_variable('A_matrix_v', shape=(self.rnn_units, self.rnn_units),
                                    initializer=xavier_initializer(), dtype=tf.float32)
         # final_GRU = tf.nn.rnn_cell.GRUCell(self.rnn_units, kernel_initializer=tf.orthogonal_initializer())
         final_GRU = rnn.GRUCell(self.rnn_units)
         reuse = None
-        #
+        # sequence_length，这个参数用来指定每个example的长度 outputs中超过这个步的结果将会被置零  减少了padding的使用
         response_GRU_embeddings, _ = tf.nn.dynamic_rnn(sentence_GRU, response_embeddings,
                                                        sequence_length=self.response_len, dtype=tf.float32,
                                                        scope='sentence_GRU')
+        # None,答句长度，隐藏状态数
         self.response_embedding_save = response_GRU_embeddings
+        # 转置成 None,词向量维度，答句长度
         response_embeddings = tf.transpose(response_embeddings, perm=[0, 2, 1])  # 转置，1和2对换
         response_GRU_embeddings = tf.transpose(response_GRU_embeddings, perm=[0, 2, 1])  # 转置，1和2对换
         matching_vectors = []
+        # 遍历每一个上下文句子及其长度
         for utterance_embeddings, utterance_len in zip(all_utterance_embeddings, all_utterance_len):
+            # 单词级别的，直接向量相乘
             matrix1 = tf.matmul(utterance_embeddings, response_embeddings)
+            # 这个句子过GRU后的向量 h1
             utterance_GRU_embeddings, _ = tf.nn.dynamic_rnn(sentence_GRU, utterance_embeddings,
                                                             sequence_length=utterance_len, dtype=tf.float32,
                                                             scope='sentence_GRU')
+            # tf.einsum(equation, *inputs)   h1*A*h2
             matrix2 = tf.einsum('aij,jk->aik', utterance_GRU_embeddings, A_matrix)  # TODO:check this
             matrix2 = tf.matmul(matrix2, response_GRU_embeddings)
+            # 对应位置的向量放到了一起
             matrix = tf.stack([matrix1, matrix2], axis=3, name='matrix_stack')
+            '''卷积 filters:一个整数，输出空间的维度，也就是卷积核的数量。
+               输入是matrix 4维向量 kernel_size:卷积核大小 padding: 边缘填充，'same' 和'valid‘选其一。默认为valid
+               kernel_initializer: 卷积核的初始化器.activation: 激活函数 reuse: Boolean型, 是否重复使用参数.
+            '''
+
             conv_layer = tf.layers.conv2d(matrix, filters=8, kernel_size=(3, 3), padding='VALID',
                                           kernel_initializer=tf.contrib.keras.initializers.he_normal(),
                                           activation=tf.nn.relu, reuse=reuse, name='conv')  # TODO: check other params
+            # 最大值池化  输入是进行池化的数据 poolsize池化核的大小 strides池化步长 padding边缘填充
             pooling_layer = tf.layers.max_pooling2d(conv_layer, (3, 3), strides=(3, 3),
                                                     padding='VALID', name='max_pooling')  # TODO: check other params
+            '''全连接 输入是二维tensor tf.contrib.layers.flatten:保留第一个维度，把第一个维度包含的每一子张量展开成一个行向量，返回张量是一个二维的
+            常用于全连接前  
+            units: 该层的神经单元结点数。kernel_initializer: 卷积核的初始化器.'''
             matching_vector = tf.layers.dense(tf.contrib.layers.flatten(pooling_layer), 50,
                                               kernel_initializer=tf.contrib.layers.xavier_initializer(),
                                               activation=tf.tanh, reuse=reuse,
@@ -105,6 +130,8 @@ class SCN():
             if not reuse:
                 reuse = True
             matching_vectors.append(matching_vector)
+
+
         '''Time_major决定了inputs Tensor前两个dim表示的含义
         time_major = False时[batch_size, sequence_length, embedding_size]
         time_major = True时[sequence_length, batch_size, embedding_size]'''
@@ -114,7 +141,7 @@ class SCN():
         logits = tf.layers.dense(last_hidden, 2, kernel_initializer=tf.contrib.layers.xavier_initializer(),
                                  name='final_v')
         self.y_pred = tf.nn.softmax(logits)
-        self.class_label_pred=tf.argmax(self.y_pred, 1)# 预测类别
+        self.class_label_pred=tf.argmax(self.y_pred, 1)# 预测类别 返回的是vector中的最大值的索引号
         self.total_loss = tf.reduce_mean(
             tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.y_true, logits=logits))
         tf.summary.scalar('loss', self.total_loss)
@@ -182,7 +209,7 @@ class SCN():
             tf.summary.scalar('loss', self.total_loss)
             optimizer = tf.train.AdamOptimizer(learning_rate=0.001)
             self.train_op = optimizer.minimize(self.total_loss)
-
+    # ???
     def copy_list(self,list):
         new_list=[]
         for l in list:
@@ -327,6 +354,7 @@ class SCN():
             start_time = time.time()
             sess.graph.finalize()
             best_score=100
+            # 1个epoch等于使用训练集中的全部样本训练一次
             while epoch < 10:
                 # low means the start location of the array of data should be feed in next
                 # n_samples means how many group-samples will be feed in next time
