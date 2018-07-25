@@ -55,13 +55,16 @@ def multi_sequences_padding(all_sequences, max_sentence_len=50):
     PAD_SEQUENCE = [0] * max_sentence_len
     padded_sequences = []
     sequences_length = []
+    #  sequences:一个上下文 总共batch个上下文 遍历上下文
     for sequences in all_sequences:
         sequences_len = len(sequences)
-        sequences_length.append(get_sequences_length(sequences, maxlen=max_sentence_len))
+        sequences_length.append(get_sequences_length(sequences, maxlen=max_sentence_len)) # 一个上下文中句子长度
+        # 填充到相同上下文句子数
         if sequences_len < max_num_utterance:
             sequences += [PAD_SEQUENCE] * (max_num_utterance - sequences_len)
             sequences_length[-1] += [0] * (max_num_utterance - sequences_len)
         else:
+            # 取后面的句子
             sequences = sequences[-max_num_utterance:]
             sequences_length[-1] = sequences_length[-1][-max_num_utterance:]
         sequences = pad_sequences(sequences, padding='post', maxlen=max_sentence_len)
